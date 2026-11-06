@@ -497,6 +497,34 @@ static void install_layout_hook() {
     log_line("Game: layout hooks installed");
 }
 
+static bool is_push_imm32(uintptr_t va, uint32_t value) {
+    const uint8_t* p = (const uint8_t*)va;
+    return p[0] == 0x68 && *(const uint32_t*)(p + 1) == value;
+}
+
+static void patch_push_imm32(uintptr_t va, uint32_t value) {
+    uint8_t* p = (uint8_t*)va;
+    DWORD old;
+    VirtualProtect(p + 1, 4, PAGE_EXECUTE_READWRITE, &old);
+    *(uint32_t*)(p + 1) = value;
+    VirtualProtect(p + 1, 4, old, &old);
+    FlushInstructionCache(GetCurrentProcess(), p + 1, 4);
+}
+
+// The "Game Paused" / "Game Speed" message (text at 0x57fef8) is drawn centred in a fixed
+// box from x=100 to 923, centred on 1024. Widening the box to keep the same margins on the
+// real width centres it there; the box is also the area redrawn around the message.
+static void centre_flash_message(int screen_w) {
+    static const uintptr_t kBoxRight[] = {0x502324, 0x50276a, 0x5027d9, 0x502de9};  // push 0x39b
+    static const uintptr_t kTextWidth = 0x5027a5;                                     // push 0x338
+    bool ok = is_push_imm32(kTextWidth, 0x338);
+    for (uintptr_t va : kBoxRight) ok = ok && is_push_imm32(va, 0x39b);
+    if (!ok) { log_line("Game: pause/speed message not recognised, left as is"); return; }
+    for (uintptr_t va : kBoxRight) patch_push_imm32(va, screen_w - 101);
+    patch_push_imm32(kTextWidth, screen_w - 200);
+    log_line("Game: pause/speed message centred");
+}
+
 // Runs inside the game's display probe, after the settings defaults are set and before a
 // mode is chosen. Mode 0 is the game's own resizable window; its size is taken from +0x10/+0x14.
 void game_on_display_probe() {
@@ -513,4 +541,5 @@ void game_on_display_probe() {
     *(LONG*)(s + 0x14) = h;
     game_log_settings("forced wide");
     install_layout_hook();
+    if (w > 1024) centre_flash_message(w);
 }
