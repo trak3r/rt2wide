@@ -1,4 +1,5 @@
 #include "common.h"
+#include <stdlib.h>
 #include <string.h>
 
 // Railroad Tycoon II Platinum (GOG build, RT2_PLAT.EXE). The exe has no ASLR and always
@@ -86,11 +87,9 @@ static void widen_mainwin(uint8_t* win) {
     for (uint8_t* c = *(uint8_t**)(win + 0x61); c; c = *(uint8_t**)(c + 0x57)) {
         uint16_t id = *(uint16_t*)(c + 0x04), type = *(uint16_t*)(c + 0x06);
         int16_t x = ctl16(c, 0x0b), w = ctl16(c, 0x0f);
-        bool stretch = false, move = false, drop = false;
+        bool stretch = false, move = false;
         if (id == 253 || id == 268) stretch = true;                         // map view and its image
-        else if (id >= 216 && id <= 219) move = drop = true;                // zoom / rotate buttons
         else if (id >= 280 && id <= 284) move = true;                       // compass
-        else if (id == 352 || id == 353) move = drop = true;                // right-edge map button
         else if (type == 0x80 && id == 0 && x + w == 1018) stretch = true;  // top/bottom border strips
         else if (type == 0x80 && id == 0 && x == 1018) move = true;         // right border pieces
         if (stretch) {
@@ -105,8 +104,6 @@ static void widen_mainwin(uint8_t* win) {
             stretched++;
         } else if (move) {
             ctl16(c, 0x0b) = (int16_t)(x + dx);
-            // These sat at the map's bottom-right corner, which is now the screen's.
-            if (drop) ctl16(c, 0x0d) = (int16_t)(ctl16(c, 0x0d) + 768 - 508);
             moved++;
         }
     }
@@ -116,9 +113,39 @@ static void widen_mainwin(uint8_t* win) {
 typedef void*(__fastcall* UiWindowLoadFn)(void* win, void* edx, int x, int y, const char* name);
 static UiWindowLoadFn o_ui_window_load;
 
+// Layouts the game places for a 1024-wide screen. Full-screen pages are drawn at x=0 and
+// some dialogs at fixed positions that only centre on 1024; both are moved to the centre.
+// Widths come from the .win files (re/tools/windump).
+static const char* const kFullScreenPages[] = {
+    "campaign.win", "compndtl.win", "compnlst.win", "credits.win", "hiscore.win", "playrdtl.win",
+    "playrlst.win", "set.win", "setup.win", "setupg.win", "setupl.win", "statndtl.win",
+    "statnlst.win", "stockdtl.win", "traindtl.win", "trainlst.win",
+};
+static const struct { const char* name; int w; } kDialogs[] = {
+    {"buildbuy.win", 774}, {"cityset.win", 774}, {"eagled.win", 513}, {"eventset.win", 774},
+    {"fileopt.win", 475},  {"filerq.win", 562},  {"helpd.win", 401},  {"mapset.win", 774},
+    {"paper.win", 771},    {"settings.win", 774}, {"trainbuy.win", 774}, {"winlose.win", 598},
+    {"yearend.win", 521},
+};
+
+static int centre_shift(const char* name, int x) {
+    int dx = *(int*)kScreenWidth - 1024;
+    if (dx <= 0 || !name) return 0;
+    for (const char* page : kFullScreenPages)
+        if (_stricmp(name, page) == 0) return x == 0 ? dx / 2 : 0;
+    for (const auto& d : kDialogs) {
+        if (_stricmp(name, d.name) != 0) continue;
+        int centred_1024 = (1024 - d.w) / 2;
+        // Dialogs the game already centres on the real screen width sit about dx/2 further right.
+        return (x + d.w <= 1024 && abs(x - centred_1024) <= 48) ? dx / 2 : 0;
+    }
+    return 0;
+}
+
 static void* __fastcall h_ui_window_load(void* win, void* edx, int x, int y, const char* name) {
-    void* r = o_ui_window_load(win, edx, x, y, name);
-    TRACE("Game ui_window_load", "%s at (%d,%d)", name ? name : "?", x, y);
+    int shift = centre_shift(name, x);
+    TRACE("Game ui_window_load", "%s at (%d,%d)%s", name ? name : "?", x, y, shift ? " -> centred" : "");
+    void* r = o_ui_window_load(win, edx, x + shift, y, name);
     if (name && _stricmp(name, "mainwin.win") == 0) widen_mainwin((uint8_t*)win);
     return r;
 }
