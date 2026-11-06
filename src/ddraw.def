@@ -1,0 +1,5 @@
+LIBRARY ddraw.dll
+EXPORTS
+    DirectDrawCreate = DirectDrawCreate@12
+    DirectDrawCreateClipper = DirectDrawCreateClipper@12
+    DirectDrawEnumerateA = DirectDrawEnumerateA@8
