@@ -3,3 +3,6 @@ backup/
 build/
 re/rt2_plat*.asm
 re/frames/
+re/mainwin.bin
+re/symbols.toml
+re/*.md

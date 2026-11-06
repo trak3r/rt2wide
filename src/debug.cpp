@@ -43,7 +43,7 @@ static DWORD WINAPI script_thread(void*) {
             post_mouse(hwnd, WM_MOUSEMOVE, 0, a, b);
             Sleep(100);
             post_mouse(hwnd, right ? WM_RBUTTONDOWN : WM_LBUTTONDOWN, right ? MK_RBUTTON : MK_LBUTTON, a, b);
-            Sleep(100);
+            Sleep(300);
             post_mouse(hwnd, right ? WM_RBUTTONUP : WM_LBUTTONUP, 0, a, b);
         } else if (!_stricmp(op, "key")) {
             UINT scan = MapVirtualKeyA((UINT)a, MAPVK_VK_TO_VSC);

@@ -22,9 +22,17 @@ $t = $t -replace '(?m)^script=.*$', "script=$Script"
 Set-Content $ini $t -NoNewline
 
 if (Test-Path $frames) { Remove-Item (Join-Path $frames '*') -Force }
-Start-Process -FilePath (Join-Path $GameDir 'RT2_PLAT.EXE') -WorkingDirectory $GameDir
-Start-Sleep -Seconds 3
-while (Get-Process RT2_PLAT -ErrorAction SilentlyContinue) { Start-Sleep -Milliseconds 500 }
+try {
+    Start-Process -FilePath (Join-Path $GameDir 'RT2_PLAT.EXE') -WorkingDirectory $GameDir
+    Start-Sleep -Seconds 3
+    while (Get-Process RT2_PLAT -ErrorAction SilentlyContinue) { Start-Sleep -Milliseconds 500 }
+} finally {
+    # Never leave test settings behind for a normal launch.
+    $t = Get-Content $ini -Raw
+    $t = $t -replace '(?m)^dump_dir=.*$', 'dump_dir=' -replace '(?m)^dump_every_ms=.*$', 'dump_every_ms=0'
+    $t = $t -replace '(?m)^autoquit_ms=.*$', 'autoquit_ms=0' -replace '(?m)^script=.*$', 'script='
+    Set-Content $ini $t -NoNewline
+}
 
 Get-ChildItem $frames -Filter *.bmp -ErrorAction SilentlyContinue | ForEach-Object {
     $png = $_.FullName -replace '\.bmp$', '.png'
