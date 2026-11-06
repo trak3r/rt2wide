@@ -4,6 +4,10 @@ Widescreen and ultrawide support for **Railroad Tycoon II Platinum** (GOG editio
 
 rt2wide is a drop-in `ddraw.dll` that replaces the game's DirectDraw with its own implementation and shows the picture through OpenGL in a borderless full-screen window. In wide mode the game draws at a resolution shaped like your monitor, so on a wide screen you see **more of the map**, not a stretched picture.
 
+![Railroad Tycoon II on a 3440x1440 ultrawide monitor with rt2wide](docs/screenshot.jpg)
+
+*Railroad Tycoon II Platinum at 3440x1440: the map fills the screen and the control panel is spread along the bottom.*
+
 Not affiliated with or endorsed by the makers or publishers of Railroad Tycoon II. You need your own copy of the game; nothing from the game is included here.
 
 ## Status
@@ -12,7 +16,7 @@ Experimental, tested on one machine (3440x1440, Windows 11, NVIDIA).
 
 - The in-game map fills the whole screen. The control panel is split into three parts along the bottom (minimap on the left, messages in the centre, logo and zoom/rotate buttons on the right) with the map visible between them, the message ticker runs the full width, and the compass moves to the top-right corner.
 - Pop-up dialogs are centred on the wide screen.
-- The main menu and other full-screen menu pages are still drawn at their original 1024x768 size at the left.
+- The main menu and other full-screen menu pages are centred at their original 1024x768 size.
 - `mode=classic` gives the original 4:3 picture, scaled up with black bars at the sides.
 
 ## Requirements
