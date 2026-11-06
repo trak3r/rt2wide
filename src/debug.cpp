@@ -6,7 +6,7 @@
 // Test harness driven by [debug] in rt2wide.ini. The game runs elevated, so outside tools
 // cannot click into it; instead a script of logical-coordinate inputs is played from inside.
 //   script = wait 5000; click 512 400; key 0x1B; dump; quit
-// Commands: wait MS | move X Y | click X Y | rclick X Y | key VK | dump | quit
+// Commands: wait MS | move X Y | click X Y | rclick X Y | key VK | dump | controls | quit
 
 static void post_mouse(HWND hwnd, UINT msg, WPARAM keys, int lx, int ly) {
     POINT logical = {lx, ly};
@@ -53,7 +53,8 @@ static DWORD WINAPI script_thread(void*) {
         } else if (!_stricmp(op, "dump")) {
             presenter_request_dump();
             Sleep(300);
-        } else if (!_stricmp(op, "quit")) quit_now("script quit");
+        } else if (!_stricmp(op, "controls")) game_dump_layout();
+        else if (!_stricmp(op, "quit")) quit_now("script quit");
         else log_line("Debug script: unknown command '%s'", op);
     }
     hooks_override_cursor(nullptr);
@@ -67,10 +68,27 @@ static DWORD WINAPI autoquit_thread(void*) {
     return 0;
 }
 
+// Logs access violations in the game's own code; the game's handling is unchanged.
+static LONG CALLBACK crash_logger(EXCEPTION_POINTERS* ep) {
+    EXCEPTION_RECORD* er = ep->ExceptionRecord;
+    CONTEXT* c = ep->ContextRecord;
+    if (er->ExceptionCode != EXCEPTION_ACCESS_VIOLATION || c->Eip < 0x401000 || c->Eip >= 0x540000) return EXCEPTION_CONTINUE_SEARCH;
+    log_line("Crash: access violation at %08lX (%s %08lX)", c->Eip, er->ExceptionInformation[0] ? "writing" : "reading",
+             (DWORD)er->ExceptionInformation[1]);
+    log_line("  eax=%08lX ebx=%08lX ecx=%08lX edx=%08lX esi=%08lX edi=%08lX ebp=%08lX esp=%08lX", c->Eax, c->Ebx, c->Ecx,
+             c->Edx, c->Esi, c->Edi, c->Ebp, c->Esp);
+    const DWORD* sp = (const DWORD*)c->Esp;
+    for (int i = 0; i < 40 && !IsBadReadPtr(sp + i, 4); i += 8)
+        log_line("  [esp+%02X] %08lX %08lX %08lX %08lX %08lX %08lX %08lX %08lX", i * 4, sp[i], sp[i + 1], sp[i + 2], sp[i + 3],
+                 sp[i + 4], sp[i + 5], sp[i + 6], sp[i + 7]);
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
 void debug_start() {
     static bool started;
     if (started) return;
     started = true;
+    AddVectoredExceptionHandler(1, crash_logger);
     if (g_cfg.dump_dir[0]) CreateDirectoryA(g_cfg.dump_dir, nullptr);
     if (g_cfg.autoquit_ms > 0) CloseHandle(CreateThread(nullptr, 0, autoquit_thread, nullptr, 0, nullptr));
     if (g_cfg.script[0]) CloseHandle(CreateThread(nullptr, 0, script_thread, nullptr, 0, nullptr));

@@ -90,5 +90,6 @@ void hooks_override_cursor(const POINT* pt);
 bool game_verified();
 void game_on_display_probe();
 void game_log_settings(const char* when);
+void game_dump_layout();
 
 void debug_start();

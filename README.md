@@ -10,7 +10,7 @@ Not affiliated with or endorsed by the makers or publishers of Railroad Tycoon I
 
 Experimental, tested on one machine (3440x1440, Windows 11, NVIDIA).
 
-- The in-game map fills the whole screen. The control panel stays in the bottom-left corner over the map, and the compass and zoom/rotate buttons move to the right-hand corners.
+- The in-game map fills the whole screen. The control panel is split into three parts along the bottom (minimap on the left, messages in the centre, logo and zoom/rotate buttons on the right) with the map visible between them, the message ticker runs the full width, and the compass moves to the top-right corner.
 - Pop-up dialogs are centred on the wide screen.
 - The main menu and other full-screen menu pages are still drawn at their original 1024x768 size at the left.
 - `mode=classic` gives the original 4:3 picture, scaled up with black bars at the sides.

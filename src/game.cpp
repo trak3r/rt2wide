@@ -1,4 +1,5 @@
 #include "common.h"
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -25,11 +26,15 @@ static const Signature kSignatures[] = {
     {0x4f1090, {0x89, 0x3D, 0x2C, 0xD2, 0x55, 0x00, 0x89, 0x35, 0x30, 0xD2}},
     // ui_window_load prologue: sub esp,0x50; mov eax,[0x57fee0]; push ebx; push ebp
     {0x507600, {0x83, 0xEC, 0x50, 0xA1, 0xE0, 0xFE, 0x57, 0x00, 0x53, 0x55}},
+    // ui_window_command prologue: mov eax,[0x57feb8]; sub esp,0x4c; test eax,eax
+    {0x507400, {0xA1, 0xB8, 0xFE, 0x57, 0x00, 0x83, 0xEC, 0x4C, 0x85, 0xC0}},
 };
 
 static const uintptr_t kScreenWidth = 0x57ab99;
 static const uintptr_t kUiWindowLoad = 0x507600;
 static const int kUiWindowLoadPrologue = 8;  // whole instructions copied to the trampoline
+static const uintptr_t kUiWindowCommand = 0x507400;
+static const int kUiWindowCommandPrologue = 8;
 
 bool game_verified() {
     static int state = -1;
@@ -68,46 +73,360 @@ void game_log_settings(const char* when) {
 // ---------------------------------------------------------------------------
 // In-game screen layout. mainwin.win is designed for 1024x768: the map view (control 253)
 // is 1024x508 with the control panel below it. On a wider screen the map fills the whole
-// screen behind the panel and the items pinned to its right edge move with it.
+// screen, the panel is split into sections spread across the bottom and the items pinned
+// to the right edge move with it.
 //
 // Window object: +0x09 width, +0x19/+0x55 copies of it, +0x61 first control.
 // Control object: +0x04 id (u16), +0x06 type (u16), +0x0b/+0x0d/+0x0f/+0x11 x/y/w/h (i16),
-// +0x57 next control. Map view (type 0x10): +0x8b/+0x8f viewport width/height.
+// +0x57 next control, +0x5b sprite bank. Map view (type 0x10): +0x8b/+0x8f viewport
+// width/height. Image (type 4): +0x7b sprite record.
 
 static int16_t& ctl16(uint8_t* c, int off) { return *(int16_t*)(c + off); }
 
+static uint8_t* g_mainwin;
+
+// Sprite banks (.imb, see rrt2-decomp docs/formats/lad.md). Bank: +0 count (u16), +2 records
+// (0x44 bytes each). Record: +0x0c group index table, +0x3c groups (14 bytes each). Group:
+// +0x0a images (0x1d bytes each). Image: +0x05 encoding, +0x09/+0x0d/+0x11/+0x15 x/y/w/h,
+// +0x19 pixel data from the game heap. Encoding 3 stores each row as [length][tokens]00,
+// the length counting itself (two bytes, big-endian, when bit 7 is set). Tokens (drawer at
+// 0x4ff4b1): 1..0x7F n opaque palette indices follow; 0x80|t<<3|n shades n pixels with
+// table t; 0xA0|n n blended indices follow; 0xC0|n skips n pixels. A zero count in a shade
+// or blend token means the count is in the next byte. The drawer stops at 0xC0 (skip 0),
+// which ends the last row in place of 00 and is followed by C0 00.
+static uint8_t* control_image(uint8_t* c) {
+    uint8_t* bank = *(uint8_t**)(c + 0x5b);
+    if (!bank || IsBadReadPtr(bank, 6)) return nullptr;
+    uint16_t idx = *(uint16_t*)(c + 0x7b);
+    if (idx >= *(uint16_t*)bank) return nullptr;
+    uint8_t* rec = *(uint8_t**)(bank + 2) + 0x44 * idx;
+    if (IsBadReadPtr(rec, 0x44)) return nullptr;
+    uint8_t* grp = *(uint8_t**)(rec + 0x3c) + 14 * *(uint32_t*)(rec + 0x0c);
+    if (IsBadReadPtr(grp, 14)) return nullptr;
+    uint8_t* img = *(uint8_t**)(grp + 0x0a);
+    if (IsBadReadPtr(img, 0x1d) || *(uint32_t*)(img + 5) != 3) return nullptr;
+    return img;
+}
+
+// Decoded pixel: -1 transparent, otherwise kind << 8 | value.
+enum { kOpaque = 0, kShade = 1, kBlend = 2 };
+
+static bool sprite_decode(uint8_t* img, int16_t* out) {
+    int w = *(int*)(img + 0x11), h = *(int*)(img + 0x15);
+    const uint8_t* p = *(const uint8_t**)(img + 0x19);
+    for (int i = 0; i < w * h; i++) out[i] = -1;
+    for (int y = 0; y < h; y++) {
+        int len = p[0] & 0x80 ? ((p[0] & 0x7f) << 8) | p[1] : p[0];
+        const uint8_t* q = p + (p[0] & 0x80 ? 2 : 1);
+        const uint8_t* end = p + len;
+        int16_t* row = out + y * w;
+        int x = 0;
+        while (q < end) {
+            uint8_t t = *q++;
+            if (t == 0) break;
+            if (t >= 0xC0) { x += t - 0xC0; continue; }
+            int n, kind, shade = 0;
+            if (t < 0x80) n = t, kind = kOpaque;
+            else if (t < 0xA0) { n = t & 7; shade = (t >> 3) & 3; kind = kShade; if (!n) n = *q++; }
+            else { n = t & 0x1f; kind = kBlend; if (!n) n = *q++; }
+            for (int i = 0; i < n; i++, x++) {
+                int16_t v = (int16_t)(kind << 8 | (kind == kShade ? shade : *q++));
+                if (x < w) row[x] = v;
+            }
+        }
+        if (q != end) { log_line("Game: sprite row %d length mismatch", y); return false; }
+        p = end;
+    }
+    return true;
+}
+
+// Encodes w x h pixels in the game's format into a buffer from the game heap.
+typedef void*(__cdecl* GameMallocFn)(size_t);
+typedef void(__cdecl* GameFreeFn)(void*);
+static const GameMallocFn game_malloc = (GameMallocFn)0x51b6b7;
+static const GameFreeFn game_free = (GameFreeFn)0x51b64e;
+
+static uint8_t* sprite_encode(const int16_t* px, int w, int h) {
+    size_t cap = 2;
+    for (int y = 0; y < h; y++) cap += 3 + w * 2;
+    uint8_t* tmp = (uint8_t*)malloc(cap);
+    uint8_t* o = tmp;
+    for (int y = 0; y < h; y++) {
+        const int16_t* row = px + y * w;
+        int last = w;
+        while (last > 0 && row[last - 1] < 0) last--;
+        bool final_row = y == h - 1;
+        if (last == 0 && !final_row) { *o++ = 1; continue; }
+        uint8_t* start = o;
+        o += 2;
+        for (int x = 0; x < last;) {
+            int16_t v = row[x];
+            int kind = v < 0 ? -1 : v >> 8;
+            int n = 1;
+            while (x + n < last && (kind == kShade ? row[x + n] == v : (row[x + n] < 0 ? -1 : row[x + n] >> 8) == kind)) n++;
+            if (kind < 0) {
+                if (n > 63) n = 63;
+                *o++ = (uint8_t)(0xC0 | n);
+            } else if (kind == kOpaque) {
+                if (n > 0x7f) n = 0x7f;
+                *o++ = (uint8_t)n;
+                for (int i = 0; i < n; i++) *o++ = (uint8_t)row[x + i];
+            } else if (kind == kShade) {
+                if (n > 255) n = 255;
+                uint8_t t = (uint8_t)(0x80 | (v & 3) << 3);
+                if (n <= 7) *o++ = (uint8_t)(t | n);
+                else { *o++ = t; *o++ = (uint8_t)n; }
+            } else {
+                if (n > 255) n = 255;
+                if (n <= 31) *o++ = (uint8_t)(0xA0 | n);
+                else { *o++ = 0xA0; *o++ = (uint8_t)n; }
+                for (int i = 0; i < n; i++) *o++ = (uint8_t)row[x + i];
+            }
+            x += n;
+        }
+        *o++ = final_row ? 0xC0 : 0;
+        int len = (int)(o - start);
+        if (len - 1 < 0x80) {
+            memmove(start + 1, start + 2, len - 2);
+            o--;
+            start[0] = (uint8_t)(len - 1);
+        } else {
+            start[0] = (uint8_t)(0x80 | len >> 8);
+            start[1] = (uint8_t)len;
+        }
+    }
+    *o++ = 0xC0;
+    *o++ = 0;
+    size_t size = o - tmp;
+    uint8_t* out = (uint8_t*)game_malloc(size);
+    if (out) memcpy(out, tmp, size);
+    free(tmp);
+    return out;
+}
+
+static void write_mask_bmp(const char* path, const int16_t* px, int w, int h) {
+    FILE* f = fopen(path, "wb");
+    if (!f) return;
+    int stride = (w * 3 + 3) & ~3;
+    BITMAPFILEHEADER fh = {0x4D42, (DWORD)(54 + stride * h), 0, 0, 54};
+    BITMAPINFOHEADER ih = {sizeof(ih), w, h, 1, 24};
+    fwrite(&fh, sizeof(fh), 1, f);
+    fwrite(&ih, sizeof(ih), 1, f);
+    uint8_t* line = (uint8_t*)calloc(stride, 1);
+    for (int y = h - 1; y >= 0; y--) {
+        for (int x = 0; x < w; x++) {
+            int v = px[y * w + x];
+            uint8_t* o = line + x * 3;
+            if (v < 0) { o[0] = 255; o[1] = 0; o[2] = 255; }
+            else if (v >> 8 == kShade) { o[0] = 160; o[1] = 0; o[2] = 0; }
+            else if (v >> 8 == kBlend) { o[0] = 0; o[1] = 160; o[2] = 0; }
+            else o[0] = o[1] = o[2] = (uint8_t)v;
+        }
+        fwrite(line, stride, 1, f);
+    }
+    free(line);
+    fclose(f);
+}
+
+void game_dump_layout() {
+    uint8_t* win = g_mainwin;
+    if (!win || IsBadReadPtr(win, 0x69)) { log_line("Layout: mainwin not loaded"); return; }
+    log_line("Layout: mainwin at (%d,%d) %dx%d", *(int*)(win + 1), *(int*)(win + 5), *(int*)(win + 9), *(int*)(win + 13));
+    int n = 0;
+    for (uint8_t* c = *(uint8_t**)(win + 0x61); c && n < 500; c = *(uint8_t**)(c + 0x57), n++) {
+        if (IsBadReadPtr(c, 0xa0)) break;
+        const char* bank = *(const char**)(c + 0x31);
+        if (!bank || IsBadReadPtr(bank, 1)) bank = "";
+        uint16_t type = *(uint16_t*)(c + 6);
+        char extra[64] = "";
+        if (type == 4) snprintf(extra, sizeof(extra), " rec=%u a=%08lX b=%08lX", *(uint16_t*)(c + 0x7b), *(DWORD*)(c + 0x7d), *(DWORD*)(c + 0x81));
+        log_line("  id=%-5u type=%-4X z=%-3u rect=(%d,%d %dx%d) flags=%08lX bank=%s%s", *(uint16_t*)(c + 4), type, c[8],
+                 ctl16(c, 0x0b), ctl16(c, 0x0d), ctl16(c, 0x0f), ctl16(c, 0x11), *(DWORD*)(c + 0x23), bank, extra);
+        uint8_t* b = *(uint8_t**)(c + 0x5b);
+        if (type == 4 && b && !IsBadReadPtr(b, 6)) {
+            uint8_t* rec = *(uint8_t**)(b + 2) + 0x44 * *(uint16_t*)(c + 0x7b);
+            if (IsBadReadPtr(rec, 0x44)) continue;
+            uint8_t* grp = *(uint8_t**)(rec + 0x3c) + 14 * *(uint32_t*)(rec + 0x0c);
+            if (IsBadReadPtr(grp, 14)) continue;
+            uint8_t* img = *(uint8_t**)(grp + 0x0a);
+            if (IsBadReadPtr(img, 0x1d)) continue;
+            uint8_t* d = *(uint8_t**)(img + 0x19);
+            char hex[100] = "";
+            for (int i = 0; i < 24 && d && !IsBadReadPtr(d + i, 1); i++) snprintf(hex + i * 3, 4, "%02X ", d[i]);
+            log_line("     img groups=%u k=%u cnt=%u flags=%02X enc=%lu x=%d y=%d w=%d h=%d data=%p: %s", *(uint32_t*)(rec + 0x40),
+                     *(uint32_t*)grp, *(uint16_t*)(grp + 4), img[0], *(DWORD*)(img + 5), *(int*)(img + 9), *(int*)(img + 13),
+                     *(int*)(img + 17), *(int*)(img + 21), d, hex);
+            uint8_t* im = control_image(c);
+            if (im && g_cfg.dump_dir[0] && !strcmp(bank, "mwfrmm.imb")) {
+                int w = *(int*)(im + 0x11), h = *(int*)(im + 0x15);
+                int16_t* px = (int16_t*)malloc(sizeof(int16_t) * w * h);
+                if (sprite_decode(im, px)) {
+                    uint8_t copy[0x1d];
+                    memcpy(copy, im, sizeof(copy));
+                    uint8_t* enc = sprite_encode(px, w, h);
+                    *(uint8_t**)(copy + 0x19) = enc;
+                    int16_t* px2 = (int16_t*)malloc(sizeof(int16_t) * w * h);
+                    bool same = enc && sprite_decode(copy, px2) && !memcmp(px, px2, sizeof(int16_t) * w * h);
+                    log_line("     round trip %s", same ? "ok" : "FAILED");
+                    free(px2);
+                    if (enc) game_free(enc);
+                    char path[MAX_PATH];
+                    snprintf(path, sizeof(path), "%s\\mwfrmm_%u.bmp", g_cfg.dump_dir, *(uint16_t*)(c + 0x7b));
+                    write_mask_bmp(path, px, w, h);
+                }
+                free(px);
+            }
+        }
+    }
+}
+
+// The control panel is split into three sections spread across the screen: the minimap on
+// the left, the message panel in the centre and the logo panel on the right, with the map
+// showing between them. The ticker band along the bottom spans the full width.
+static const int kCutLeft = 280;       // first column of the centre section
+static const int kCutRight = 738;      // first column of the right section
+static const int kTickerRow = 223;     // first ticker row in the panel sprite (y 731)
+static const int kTickerCapLeft = 300; // the ticker repeats columns [300, 700) in its middle
+static const int kTickerCapRight = 700;
+
+static int section_shift(int x, int dx) { return x < kCutLeft ? 0 : x < kCutRight ? dx / 2 : dx; }
+
+// mwfrmm.imb sprites: 1 the tab at the right edge, 2 the strip above the panel with the
+// zoom button sockets, 3 the panel itself. They are drawn at their own x/y, so the split
+// rewrites the shared sprite; the bank stays loaded, so it is only done once.
+static bool split_panel_sprite(uint8_t* img, int sprite, int dx) {
+    int w = *(int*)(img + 0x11), h = *(int*)(img + 0x15), nw = w + dx;
+    if (w != 1024) return w == 1024 + dx;
+    int16_t* px = (int16_t*)malloc(sizeof(int16_t) * w * h);
+    int16_t* out = (int16_t*)malloc(sizeof(int16_t) * nw * h);
+    bool ok = px && out && sprite_decode(img, px);
+    if (ok) {
+        for (int i = 0; i < nw * h; i++) out[i] = -1;
+        for (int y = 0; y < h; y++) {
+            const int16_t* src = px + y * w;
+            int16_t* dst = out + y * nw;
+            if (sprite == 3 && y >= kTickerRow) {
+                for (int x = 0; x < nw; x++) {
+                    int sx = x < kTickerCapLeft ? x
+                           : x >= nw - (w - kTickerCapRight) ? x - dx
+                           : kTickerCapLeft + (x - kTickerCapLeft) % (kTickerCapRight - kTickerCapLeft);
+                    dst[x] = src[sx];
+                }
+                continue;
+            }
+            // The strip's upper rows have a wider cap on the minimap frame and start the
+            // logo frame one column earlier.
+            bool upper = sprite == 2 && y < 80;
+            int cut_l = upper ? 285 : kCutLeft, cut_r = upper ? 737 : kCutRight;
+            for (int x = 0; x < w; x++)
+                dst[x + (x < cut_l ? 0 : x < cut_r ? dx / 2 : dx)] = src[x];
+        }
+        uint8_t* enc = sprite_encode(out, nw, h);
+        ok = enc != nullptr;
+        if (ok) {
+            game_free(*(uint8_t**)(img + 0x19));
+            *(uint8_t**)(img + 0x19) = enc;
+            *(int*)(img + 0x11) = nw;
+        }
+    }
+    free(px);
+    free(out);
+    return ok;
+}
+
+static int screen_dx() { return *(int*)kScreenWidth - 1024; }
+
+// Frame sprites (ids 334-336) get their bank from code after the layout loads (mwfrme,
+// mwfrms or mwfrmm.imb by game mode) and take their rect from the sprite.
+static void fix_frame_control(uint8_t* c, int dx) {
+    uint16_t id = *(uint16_t*)(c + 0x04);
+    uint8_t* img = control_image(c);
+    if (!img) return;
+    if (id == 334) {
+        if (*(int*)(img + 0x09) == 1002) *(int*)(img + 0x09) += dx;
+        ctl16(c, 0x0b) = (int16_t)*(int*)(img + 0x09);
+    } else if (id == 335 || id == 336) {
+        if (!split_panel_sprite(img, id - 333, dx)) {
+            log_line("Game: frame sprite %u not recognised, left unsplit", id);
+            return;
+        }
+        ctl16(c, 0x0f) = (int16_t)*(int*)(img + 0x11);
+    }
+}
+
+// How far a control of the 1024-wide layout moves, for controls that keep their size.
+static int control_shift(uint8_t* c, int x, int dx) {
+    uint16_t id = *(uint16_t*)(c + 0x04), type = *(uint16_t*)(c + 0x06);
+    if (id == 253 || id == 268 || id == 255 || (id >= 333 && id <= 336) || (type == 0x80 && id == 0)) return 0;
+    if (id >= 280 && id <= 284) return dx;  // compass
+    return section_shift(x + ctl16(c, 0x0f) / 2, dx);
+}
+
 static void widen_mainwin(uint8_t* win) {
-    int screen_w = *(int*)kScreenWidth;
-    int dx = screen_w - 1024;
+    g_mainwin = win;
+    int dx = screen_dx();
     if (dx <= 0 || *(int*)(win + 0x09) != 1024) return;
     *(int*)(win + 0x09) += dx;
     *(int*)(win + 0x19) += dx;
     *(int*)(win + 0x55) += dx;
+
     int stretched = 0, moved = 0;
     for (uint8_t* c = *(uint8_t**)(win + 0x61); c; c = *(uint8_t**)(c + 0x57)) {
         uint16_t id = *(uint16_t*)(c + 0x04), type = *(uint16_t*)(c + 0x06);
-        int16_t x = ctl16(c, 0x0b), w = ctl16(c, 0x0f);
-        bool stretch = false, move = false;
-        if (id == 253 || id == 268) stretch = true;                         // map view and its image
-        else if (id >= 280 && id <= 284) move = true;                       // compass
-        else if (type == 0x80 && id == 0 && x + w == 1018) stretch = true;  // top/bottom border strips
-        else if (type == 0x80 && id == 0 && x == 1018) move = true;         // right border pieces
+        int16_t x = ctl16(c, 0x0b), w = ctl16(c, 0x0f), h = ctl16(c, 0x11);
+        int stretch = 0, move = 0;
+        if (id == 253 || id == 268) stretch = dx;                         // map view and its image
+        else if (id == 255) stretch = dx;                                 // ticker text
+        else if (type == 0x80 && id == 0 && x + w == 1018) stretch = dx;  // top/bottom border strips
+        else if (type == 0x80 && id == 0 && x == 1018) move = dx;         // right border pieces
+        else if (id >= 334 && id <= 336) fix_frame_control(c, dx);
+        else move = control_shift(c, x, dx);
         if (stretch) {
-            ctl16(c, 0x0f) = (int16_t)(w + dx);
-            if (type == 0x10) *(int*)(c + 0x8b) += dx;
+            ctl16(c, 0x0f) = (int16_t)(w + stretch);
+            if (type == 0x10) *(int*)(c + 0x8b) += stretch;
             // The map continues under the control panel so the space beside it is not empty.
             if (id == 253 || id == 268) {
-                int16_t h = ctl16(c, 0x11);
                 ctl16(c, 0x11) = 768;
                 if (type == 0x10) *(int*)(c + 0x8f) += 768 - h;
             }
             stretched++;
         } else if (move) {
-            ctl16(c, 0x0b) = (int16_t)(x + dx);
+            ctl16(c, 0x0b) = (int16_t)(x + move);
             moved++;
         }
     }
-    log_line("Game: mainwin.win widened to %d (stretched %d controls, moved %d)", screen_w, stretched, moved);
+    log_line("Game: mainwin.win widened to %d (stretched %d controls, moved %d)", 1024 + dx, stretched, moved);
+}
+
+static uint8_t* find_control(uint8_t* win, uint16_t id) {
+    for (uint8_t* c = *(uint8_t**)(win + 0x61); c; c = *(uint8_t**)(c + 0x57))
+        if (*(uint16_t*)(c + 0x04) == id) return c;
+    return nullptr;
+}
+
+// Window commands (0x507400, thiscall(win, msg), ret 4). msg: +0 command, +4 control id,
+// then arguments. 0x72 sets a control's sprite bank (+8 name), 0x73 moves it (+8 x, +0xc y).
+enum { kCmdSetBank = 0x72, kCmdMove = 0x73 };
+typedef int(__fastcall* UiWindowCommandFn)(void* win, void* edx, int* msg);
+static UiWindowCommandFn o_ui_window_command;
+
+static int __fastcall h_ui_window_command(void* win, void* edx, int* msg) {
+    int dx = screen_dx();
+    if (win != g_mainwin || dx <= 0 || !msg) return o_ui_window_command(win, edx, msg);
+    int cmd = msg[0];
+    uint8_t* c = (cmd == kCmdSetBank || cmd == kCmdMove) ? find_control((uint8_t*)win, (uint16_t)msg[1]) : nullptr;
+    if (!c) return o_ui_window_command(win, edx, msg);
+    if (cmd == kCmdMove) {
+        int x = msg[2], shift = control_shift(c, x, dx);
+        msg[2] = x + shift;
+        int r = o_ui_window_command(win, edx, msg);
+        msg[2] = x;
+        return r;
+    }
+    int r = o_ui_window_command(win, edx, msg);
+    uint16_t id = *(uint16_t*)(c + 0x04);
+    if (id >= 334 && id <= 336) fix_frame_control(c, dx);
+    return r;
 }
 
 typedef void*(__fastcall* UiWindowLoadFn)(void* win, void* edx, int x, int y, const char* name);
@@ -145,29 +464,37 @@ static int centre_shift(const char* name, int x) {
 static void* __fastcall h_ui_window_load(void* win, void* edx, int x, int y, const char* name) {
     int shift = centre_shift(name, x);
     TRACE("Game ui_window_load", "%s at (%d,%d)%s", name ? name : "?", x, y, shift ? " -> centred" : "");
+    if (win == g_mainwin) g_mainwin = nullptr;
     void* r = o_ui_window_load(win, edx, x + shift, y, name);
     if (name && _stricmp(name, "mainwin.win") == 0) widen_mainwin((uint8_t*)win);
     return r;
 }
 
-static void install_layout_hook() {
-    uint8_t* target = (uint8_t*)kUiWindowLoad;
+// Redirects a function whose first `prologue` bytes are whole instructions; returns a
+// trampoline that runs them and continues in the original.
+static void* hook_code(uintptr_t va, int prologue, void* detour) {
+    uint8_t* target = (uint8_t*)va;
     uint8_t* tramp = (uint8_t*)VirtualAlloc(nullptr, 32, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
-    if (!tramp) { log_line("Game: no memory for layout hook"); return; }
-    memcpy(tramp, target, kUiWindowLoadPrologue);
-    tramp[kUiWindowLoadPrologue] = 0xE9;
-    *(int32_t*)(tramp + kUiWindowLoadPrologue + 1) =
-        (int32_t)((target + kUiWindowLoadPrologue) - (tramp + kUiWindowLoadPrologue + 5));
-    o_ui_window_load = (UiWindowLoadFn)tramp;
+    if (!tramp) return nullptr;
+    memcpy(tramp, target, prologue);
+    tramp[prologue] = 0xE9;
+    *(int32_t*)(tramp + prologue + 1) = (int32_t)((target + prologue) - (tramp + prologue + 5));
 
     DWORD old;
-    VirtualProtect(target, kUiWindowLoadPrologue, PAGE_EXECUTE_READWRITE, &old);
+    VirtualProtect(target, prologue, PAGE_EXECUTE_READWRITE, &old);
     target[0] = 0xE9;
-    *(int32_t*)(target + 1) = (int32_t)((uint8_t*)h_ui_window_load - (target + 5));
-    for (int i = 5; i < kUiWindowLoadPrologue; i++) target[i] = 0x90;
-    VirtualProtect(target, kUiWindowLoadPrologue, old, &old);
-    FlushInstructionCache(GetCurrentProcess(), target, kUiWindowLoadPrologue);
-    log_line("Game: layout hook installed");
+    *(int32_t*)(target + 1) = (int32_t)((uint8_t*)detour - (target + 5));
+    for (int i = 5; i < prologue; i++) target[i] = 0x90;
+    VirtualProtect(target, prologue, old, &old);
+    FlushInstructionCache(GetCurrentProcess(), target, prologue);
+    return tramp;
+}
+
+static void install_layout_hook() {
+    o_ui_window_load = (UiWindowLoadFn)hook_code(kUiWindowLoad, kUiWindowLoadPrologue, (void*)h_ui_window_load);
+    o_ui_window_command = (UiWindowCommandFn)hook_code(kUiWindowCommand, kUiWindowCommandPrologue, (void*)h_ui_window_command);
+    if (!o_ui_window_load || !o_ui_window_command) { log_line("Game: no memory for layout hooks"); return; }
+    log_line("Game: layout hooks installed");
 }
 
 // Runs inside the game's display probe, after the settings defaults are set and before a
