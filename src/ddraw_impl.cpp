@@ -556,7 +556,8 @@ HRESULT DDraw::CreateSurface(LPDDSURFACEDESC desc, LPDIRECTDRAWSURFACE* out, IUn
     int mbpp = mode_bpp ? mode_bpp : 16;
     Surface* s;
     if (caps & DDSCAPS_PRIMARYSURFACE) {
-        int w = mode_w ? mode_w : 1024, h = mode_h ? mode_h : 768;
+        int w, h;
+        logical_size(&w, &h);
         DWORD pcaps = caps | DDSCAPS_VISIBLE | DDSCAPS_VIDEOMEMORY | DDSCAPS_LOCALVIDMEM;
         bool flip = (desc->dwFlags & DDSD_BACKBUFFERCOUNT) && desc->dwBackBufferCount > 0;
         if (flip) pcaps |= DDSCAPS_FRONTBUFFER | DDSCAPS_FLIP | DDSCAPS_COMPLEX;
@@ -655,7 +656,7 @@ HRESULT DDraw::GetCaps(LPDDCAPS drv, LPDDCAPS hel) {
 HRESULT DDraw::GetDisplayMode(LPDDSURFACEDESC desc) {
     if (!desc) return DDERR_INVALIDPARAMS;
     int w = mode_w, h = mode_h, bpp = mode_bpp;
-    if (!w) { w = GetSystemMetrics(SM_CXSCREEN); h = GetSystemMetrics(SM_CYSCREEN); bpp = 32; }
+    if (!w) { w = GetSystemMetrics(SM_CXSCREEN); h = GetSystemMetrics(SM_CYSCREEN); bpp = g_cfg.wide ? 16 : 32; }
     TRACE("DDraw::GetDisplayMode", "-> %dx%dx%d", w, h, bpp);
     memset(desc, 0, sizeof(DDSURFACEDESC));
     desc->dwSize = sizeof(DDSURFACEDESC);
@@ -687,8 +688,19 @@ HRESULT DDraw::GetVerticalBlankStatus(WINBOOL* in_vb) {
 HRESULT DDraw::Initialize(GUID*) { return DDERR_ALREADYINITIALIZED; }
 HRESULT DDraw::RestoreDisplayMode() { TRACE("DDraw::RestoreDisplayMode", ""); return DD_OK; }
 
+void DDraw::logical_size(int* w, int* h) const {
+    if (exclusive && mode_w) { *w = mode_w; *h = mode_h; }
+    else if (!exclusive && g_cfg.wide) presenter_wide_size(w, h);
+    else { *w = mode_w ? mode_w : 1024; *h = mode_h ? mode_h : 768; }
+}
+
 HRESULT DDraw::SetCooperativeLevel(HWND hwnd, DWORD flags) {
     TRACE("DDraw::SetCooperativeLevel", "hwnd=%p flags=%08lX", hwnd, flags);
+    game_log_settings("SetCooperativeLevel");
+    exclusive = (flags & DDSCL_FULLSCREEN) != 0;
+    int w, h;
+    logical_size(&w, &h);
+    presenter_set_logical(w, h);
     if (hwnd) presenter_attach_window(hwnd);
     return DD_OK;
 }
@@ -697,6 +709,7 @@ HRESULT DDraw::SetDisplayMode(DWORD w, DWORD h, DWORD bpp, DWORD refresh, DWORD 
     log_line("DDraw::SetDisplayMode %lux%lux%lu refresh=%lu flags=%08lX", w, h, bpp, refresh, flags);
     if (bpp != 8 && bpp != 16 && bpp != 32) return DDERR_INVALIDMODE;
     mode_w = w; mode_h = h; mode_bpp = bpp;
+    if (exclusive) presenter_set_logical(w, h);
     presenter_mark_dirty();
     return DD_OK;
 }

@@ -51,19 +51,23 @@ Write-Step "Windows compatibility settings"
 $saved = @()
 if (Test-Path $CompatPath) { $saved = @(Get-Content $CompatPath -Raw | ConvertFrom-Json | ForEach-Object { $_ }) }
 $now = @(Get-CompatValues)
+$compatChanges = @()
 foreach ($s in $saved) {
     $cur = $now | Where-Object { $_.Key -eq $s.Key -and $_.Name -eq $s.Name }
     if ($cur.Value -eq $s.Value) { continue }
-    if ($Check -or $s.Key -like 'HKLM:*') { Write-Warn2 "differs: $($s.Key) -> '$($cur.Value)' (original '$($s.Value)')"; $problems++; continue }
-    Set-ItemProperty -Path $s.Key -Name $s.Name -Value $s.Value
-    Write-Ok "restored $($s.Key)"
+    if ($Check) { Write-Warn2 "differs: $($s.Key) -> '$($cur.Value)' (original '$($s.Value)')"; $problems++; continue }
+    $compatChanges += [pscustomobject]@{ Key = $s.Key; Name = $s.Name; Value = $s.Value }
 }
 foreach ($c in $now) {
     if ($saved | Where-Object { $_.Key -eq $c.Key -and $_.Name -eq $c.Name }) { continue }
-    if ($Check -or $c.Key -like 'HKLM:*') { Write-Warn2 "added since backup: $($c.Key) = '$($c.Value)'"; $problems++; continue }
-    Remove-ItemProperty -Path $c.Key -Name $c.Name
-    Write-Ok "removed added setting from $($c.Key)"
+    if ($Check) { Write-Warn2 "added since backup: $($c.Key) = '$($c.Value)'"; $problems++; continue }
+    $compatChanges += [pscustomobject]@{ Key = $c.Key; Name = $c.Name; Value = $null }
 }
+if ($compatChanges.Count) {
+    if (-not (Set-CompatValues $compatChanges)) {
+        Write-Warn2 'Run ROLLBACK.cmd again and allow the prompt to finish restoring the machine-wide setting.'
+    }
+} elseif (-not $Check) { Write-Ok 'already original' }
 
 if ($Check) {
     if ($problems -eq 0) { Write-Host "`nGame matches the original backup." -ForegroundColor Green }

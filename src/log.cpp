@@ -37,8 +37,18 @@ void config_load() {
     else g_cfg.scaling = Scaling::Aspect;
     g_cfg.linear_filter = !ini_equals("display", "filter", "linear", "nearest", path);
     g_cfg.vsync = GetPrivateProfileIntA("display", "vsync", 1, path) != 0;
+    g_cfg.wide = !ini_equals("display", "mode", "wide", "classic", path);
+    g_cfg.wide_w = GetPrivateProfileIntA("display", "width", 0, path);
+    g_cfg.wide_h = GetPrivateProfileIntA("display", "height", 768, path);
+    if (g_cfg.wide_h < 600) g_cfg.wide_h = 600;
+    if (g_cfg.wide_w && g_cfg.wide_w < 1024) g_cfg.wide_w = 1024;
     g_cfg.log = GetPrivateProfileIntA("debug", "log", 1, path) != 0;
     g_cfg.trace_limit = GetPrivateProfileIntA("debug", "trace_limit", 25, path);
+    GetPrivateProfileStringA("debug", "dump_dir", "", g_cfg.dump_dir, sizeof(g_cfg.dump_dir), path);
+    g_cfg.dump_every_ms = GetPrivateProfileIntA("debug", "dump_every_ms", 0, path);
+    g_cfg.dump_max = GetPrivateProfileIntA("debug", "dump_max", 20, path);
+    g_cfg.autoquit_ms = GetPrivateProfileIntA("debug", "autoquit_ms", 0, path);
+    GetPrivateProfileStringA("debug", "script", "", g_cfg.script, sizeof(g_cfg.script), path);
 }
 
 void log_open() {

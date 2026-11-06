@@ -1,5 +1,6 @@
 # Adds the widescreen wrapper to the game folder. Only adds files; never modifies original ones.
-param([switch]$AllowUnknownExe, [switch]$ResetConfig)
+#   -KeepXpMode  leave GOG's Windows XP compatibility mode (and its admin prompt) in place
+param([switch]$AllowUnknownExe, [switch]$ResetConfig, [switch]$KeepXpMode)
 . "$PSScriptRoot\common.ps1"
 
 Assert-GameNotRunning
@@ -30,5 +31,7 @@ if ($ResetConfig -or -not (Test-Path $gameIni)) {
 } else {
     Write-Ok 'rt2wide.ini (kept your existing settings)'
 }
+
+if (-not $KeepXpMode) { & "$PSScriptRoot\no-uac.ps1" }
 
 Write-Host "`nInstalled. Launch the game as usual. To undo everything, run ROLLBACK.cmd." -ForegroundColor Green

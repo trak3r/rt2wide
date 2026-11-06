@@ -1,8 +1,9 @@
 #include "common.h"
+#include <stdint.h>
 #include <string.h>
 
 // The game reads the mouse and window geometry through these user32 calls. Its import
-// table is redirected here so it keeps seeing a 1024x768 window at the screen origin.
+// table is redirected here so it sees a window of the logical size at the screen origin.
 
 typedef BOOL(WINAPI* GetCursorPosFn)(LPPOINT);
 typedef BOOL(WINAPI* PointFn)(HWND, LPPOINT);
@@ -14,7 +15,16 @@ static PointFn o_ScreenToClient, o_ClientToScreen;
 static RectFn o_GetClientRect, o_GetWindowRect;
 static GetDeviceCapsFn o_GetDeviceCaps;
 
+static volatile LONG g_cursor_override;
+static POINT g_cursor;
+
+void hooks_override_cursor(const POINT* pt) {
+    if (pt) g_cursor = *pt;
+    InterlockedExchange(&g_cursor_override, pt ? 1 : 0);
+}
+
 static BOOL WINAPI h_GetCursorPos(LPPOINT pt) {
+    if (g_cursor_override && pt) { *pt = g_cursor; return TRUE; }
     BOOL r = o_GetCursorPos(pt);
     if (r && pt) presenter_map_screen(pt);
     return r;
@@ -42,10 +52,17 @@ static BOOL WINAPI h_GetWindowRect(HWND hwnd, LPRECT rc) {
     return o_GetWindowRect(hwnd, rc);
 }
 
+// The game only offers its windowed mode on a 16-bit desktop; our surfaces are 16-bit
+// whatever the real desktop depth is.
 static int WINAPI h_GetDeviceCaps(HDC hdc, int index) {
     int r = o_GetDeviceCaps(hdc, index);
-    TRACE("GDI GetDeviceCaps", "index=%d -> %d", index, r);
-    return r;
+    int reported = r;
+    if (index == BITSPIXEL && g_cfg.wide && game_verified()) {
+        reported = 16;
+        game_on_display_probe();
+    }
+    TRACE("GDI GetDeviceCaps", "index=%d -> %d (reported %d)", index, r, reported);
+    return reported;
 }
 
 static bool patch_import(HMODULE mod, const char* dll, const char* name, void* repl, void** orig) {
@@ -68,6 +85,7 @@ static bool patch_import(HMODULE mod, const char* dll, const char* name, void* r
                 match = (void*)addrs[i].u1.Function == target;
             }
             if (!match) continue;
+            if ((void*)addrs[i].u1.Function == repl) return true;
             DWORD old;
             VirtualProtect(&addrs[i], sizeof(addrs[i]), PAGE_READWRITE, &old);
             *orig = (void*)addrs[i].u1.Function;
@@ -80,9 +98,6 @@ static bool patch_import(HMODULE mod, const char* dll, const char* name, void* r
 }
 
 void hooks_install() {
-    static bool done;
-    if (done) return;
-    done = true;
     HMODULE exe = GetModuleHandleA(nullptr);
     struct { const char* dll; const char* name; void* repl; void** orig; } hooks[] = {
         {"USER32.dll", "GetCursorPos", (void*)h_GetCursorPos, (void**)&o_GetCursorPos},
@@ -92,6 +107,9 @@ void hooks_install() {
         {"USER32.dll", "GetWindowRect", (void*)h_GetWindowRect, (void**)&o_GetWindowRect},
         {"GDI32.dll", "GetDeviceCaps", (void*)h_GetDeviceCaps, (void**)&o_GetDeviceCaps},
     };
-    for (auto& h : hooks)
-        log_line("Hook %s!%s: %s", h.dll, h.name, patch_import(exe, h.dll, h.name, h.repl, h.orig) ? "ok" : "NOT FOUND");
+    for (auto& h : hooks) {
+        void* before = *h.orig;
+        bool ok = patch_import(exe, h.dll, h.name, h.repl, h.orig);
+        if (!ok || *h.orig != before) log_line("Hook %s!%s: %s", h.dll, h.name, ok ? "ok" : "NOT FOUND");
+    }
 }

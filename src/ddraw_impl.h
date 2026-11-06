@@ -178,7 +178,11 @@ public:
 
     DDraw1 v1;
     int mode_w = 0, mode_h = 0, mode_bpp = 0;
+    bool exclusive = false;
     Surface* primary = nullptr;
+
+    // What the game should believe its screen (or window client area) measures.
+    void logical_size(int* w, int* h) const;
 
 private:
     LONG ref_ = 1;

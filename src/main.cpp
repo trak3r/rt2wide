@@ -28,7 +28,9 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved) {
         presenter_init();
         char exe[MAX_PATH];
         GetModuleFileNameA(nullptr, exe, MAX_PATH);
-        log_line("rt2wide loaded into %s (enabled=%d)", exe, (int)g_cfg.enabled);
+        log_line("rt2wide loaded into %s (enabled=%d, mode=%s)", exe, (int)g_cfg.enabled, g_cfg.wide ? "wide" : "classic");
+        // The game probes the desktop before it ever calls DirectDrawCreate.
+        if (g_cfg.enabled) hooks_install();
     } else if (reason == DLL_PROCESS_DETACH) {
         if (!reserved) presenter_shutdown();
         trace_summary();
@@ -46,6 +48,7 @@ extern "C" HRESULT WINAPI DirectDrawCreate(GUID* guid, LPDIRECTDRAW* out, IUnkno
     }
     if (!out) return DDERR_INVALIDPARAMS;
     hooks_install();
+    game_log_settings("DirectDrawCreate");
     DDraw* dd = new DDraw();
     *out = static_cast<IDirectDraw*>(&dd->v1);
     return DD_OK;

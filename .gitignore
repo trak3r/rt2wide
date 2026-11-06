@@ -1,3 +1,5 @@
 tools/
 backup/
 build/
+re/rt2_plat*.asm
+re/frames/

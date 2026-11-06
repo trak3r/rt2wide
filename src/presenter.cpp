@@ -1,5 +1,6 @@
 #include "ddraw_impl.h"
 #include <GL/gl.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -38,13 +39,32 @@ void presenter_mark_dirty() {
     if (g_wake) SetEvent(g_wake);
 }
 
+void presenter_set_logical(int w, int h) {
+    if (w == g_lw && h == g_lh) return;
+    InterlockedExchange(&g_lw, w);
+    InterlockedExchange(&g_lh, h);
+    log_line("Presenter: logical size %dx%d", w, h);
+    presenter_mark_dirty();
+}
+
+void presenter_wide_size(int* w, int* h) {
+    MONITORINFO mi = {sizeof(mi)};
+    HMONITOR mon = g_hwnd ? MonitorFromWindow(g_hwnd, MONITOR_DEFAULTTOPRIMARY)
+                          : MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY);
+    GetMonitorInfoA(mon, &mi);
+    int mw = mi.rcMonitor.right - mi.rcMonitor.left, mh = mi.rcMonitor.bottom - mi.rcMonitor.top;
+    *h = g_cfg.wide_h;
+    if (g_cfg.wide_w) *w = g_cfg.wide_w;
+    else *w = mh > 0 ? (int)((int64_t)g_cfg.wide_h * mw / mh) & ~7 : 1024;
+    if (*w < 1024) *w = 1024;
+}
+
 void presenter_set_primary(Surface* s) {
     presenter_lock();
     g_primary = s;
-    InterlockedExchange(&g_lw, s->w);
-    InterlockedExchange(&g_lh, s->h);
     presenter_unlock();
     log_line("Presenter: primary is %dx%dx%d", s->w, s->h, s->bpp);
+    presenter_set_logical(s->w, s->h);
     presenter_mark_dirty();
 }
 
@@ -107,6 +127,27 @@ bool presenter_map_screen(POINT* pt) {
     return true;
 }
 
+bool presenter_unmap_client(POINT* pt) {
+    Viewport v;
+    if (!presenter_viewport(&v) || v.lw <= 0 || v.lh <= 0) return false;
+    pt->x = v.x + (int)(((int64_t)pt->x * 2 + 1) * v.w / (2 * v.lw));
+    pt->y = v.y + (int)(((int64_t)pt->y * 2 + 1) * v.h / (2 * v.lh));
+    return true;
+}
+
+HWND presenter_window() { return g_hwnd; }
+
+// ---------------------------------------------------------------------------
+// Debug frame dumps (BMP files in [debug] dump_dir)
+
+static volatile LONG g_dump_now;
+static int g_dumps;
+
+void presenter_request_dump() {
+    InterlockedExchange(&g_dump_now, 1);
+    presenter_mark_dirty();
+}
+
 // ---------------------------------------------------------------------------
 // Rendering thread
 
@@ -136,6 +177,50 @@ static bool snapshot(Frame* f) {
     }
     presenter_unlock();
     return true;
+}
+
+static void dump_frame(const Frame& f) {
+    if (!g_cfg.dump_dir[0] || g_dumps >= g_cfg.dump_max) return;
+    char path[MAX_PATH];
+    snprintf(path, sizeof(path), "%s\\frame_%03d_%dx%d.bmp", g_cfg.dump_dir, g_dumps++, f.w, f.h);
+    int row = (f.w * 3 + 3) & ~3;
+    BITMAPFILEHEADER fh = {};
+    BITMAPINFOHEADER ih = {};
+    fh.bfType = 0x4D42;
+    fh.bfOffBits = sizeof(fh) + sizeof(ih);
+    fh.bfSize = fh.bfOffBits + row * f.h;
+    ih.biSize = sizeof(ih);
+    ih.biWidth = f.w;
+    ih.biHeight = -f.h;
+    ih.biPlanes = 1;
+    ih.biBitCount = 24;
+    FILE* out = fopen(path, "wb");
+    if (!out) { log_line("Dump: cannot write %s", path); return; }
+    fwrite(&fh, sizeof(fh), 1, out);
+    fwrite(&ih, sizeof(ih), 1, out);
+    uint8_t* line = (uint8_t*)calloc(row, 1);
+    for (int y = 0; y < f.h && line; y++) {
+        const uint8_t* src = f.pixels + (size_t)y * f.pitch;
+        for (int x = 0; x < f.w; x++) {
+            uint8_t r, g, b;
+            if (f.bpp == 16) {
+                uint16_t p = ((const uint16_t*)src)[x];
+                r = (uint8_t)(((p >> 11) & 31) * 255 / 31);
+                g = (uint8_t)(((p >> 5) & 63) * 255 / 63);
+                b = (uint8_t)((p & 31) * 255 / 31);
+            } else if (f.bpp == 32) {
+                b = src[x * 4]; g = src[x * 4 + 1]; r = src[x * 4 + 2];
+            } else {
+                const PALETTEENTRY& e = f.pal[src[x]];
+                r = e.peRed; g = e.peGreen; b = e.peBlue;
+            }
+            line[x * 3] = b; line[x * 3 + 1] = g; line[x * 3 + 2] = r;
+        }
+        fwrite(line, row, 1, out);
+    }
+    free(line);
+    fclose(out);
+    log_line("Dump: wrote %s", path);
 }
 
 struct GlState {
@@ -279,7 +364,7 @@ static DWORD WINAPI render_thread(void*) {
     log_line("Presenter: rendering with %s, scaling=%d, linear=%d", use_gl ? "OpenGL" : "GDI", (int)g_cfg.scaling,
              (int)g_cfg.linear_filter);
     Frame frame;
-    DWORD last = 0;
+    DWORD last = 0, last_dump = GetTickCount();
     while (!g_quit) {
         WaitForSingleObject(g_wake, 16);
         if (g_quit) break;
@@ -287,6 +372,11 @@ static DWORD WINAPI render_thread(void*) {
         DWORD now = GetTickCount();
         if (!dirty && now - last < 500) continue;
         if (!snapshot(&frame)) continue;
+        bool timed = g_cfg.dump_every_ms > 0 && now - last_dump >= (DWORD)g_cfg.dump_every_ms;
+        if (InterlockedExchange(&g_dump_now, 0) || timed) {
+            dump_frame(frame);
+            last_dump = now;
+        }
         RECT rc;
         GetClientRect(hwnd, &rc);
         int cw = rc.right - rc.left, ch = rc.bottom - rc.top;
@@ -361,8 +451,14 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_ERASEBKGND:
         if (g_borderless) return 1;
         break;
-    case WM_PAINT:
     case WM_SIZE:
+        if (g_borderless && wp != SIZE_MINIMIZED && g_lw) {
+            TRACE("Presenter WM_SIZE", "%dx%d reported as %ldx%ld", LOWORD(lp), HIWORD(lp), g_lw, g_lh);
+            lp = MAKELPARAM(g_lw, g_lh);
+        }
+        presenter_mark_dirty();
+        break;
+    case WM_PAINT:
     case WM_ACTIVATEAPP:
     case WM_DISPLAYCHANGE:
         presenter_mark_dirty();
@@ -406,6 +502,7 @@ void presenter_attach_window(HWND hwnd) {
         g_hwnd = hwnd;
         g_orig_proc = (WNDPROC)SetWindowLongPtrA(hwnd, GWLP_WNDPROC, (LONG_PTR)wndproc);
         log_line("Presenter: attached to window %p", hwnd);
+        debug_start();
     }
     make_borderless(hwnd);
     if (!g_thread) {

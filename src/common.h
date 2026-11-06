@@ -15,8 +15,18 @@ struct Config {
     Scaling scaling = Scaling::Aspect;
     bool linear_filter = true;
     bool vsync = true;
+    // wide: run the game in its own resizable windowed mode at a monitor-shaped logical size.
+    // Otherwise it keeps its fixed 1024x768 full-screen mode and the picture is scaled.
+    bool wide = true;
+    int wide_w = 0;  // 0 = derive from the monitor's aspect ratio
+    int wide_h = 768;
     bool log = true;
     int trace_limit = 25;
+    char dump_dir[MAX_PATH] = "";
+    int dump_every_ms = 0;
+    int dump_max = 20;
+    int autoquit_ms = 0;
+    char script[1024] = "";
 };
 
 extern Config g_cfg;
@@ -51,6 +61,9 @@ struct Viewport {
 class Surface;
 
 void presenter_init();
+// Size the game is told its window has; the primary surface and all coordinate hooks use it.
+void presenter_set_logical(int w, int h);
+void presenter_wide_size(int* w, int* h);
 void presenter_attach_window(HWND hwnd);
 void presenter_set_primary(Surface* s);
 void presenter_clear_primary(Surface* s);
@@ -64,5 +77,18 @@ bool presenter_owns(HWND hwnd, int* lw, int* lh);
 // Convert real window-client / real screen coordinates into the game's logical coordinates.
 bool presenter_map_client(POINT* pt);
 bool presenter_map_screen(POINT* pt);
+// Inverse of presenter_map_client: logical point to the centre of its real client pixel.
+bool presenter_unmap_client(POINT* pt);
+HWND presenter_window();
+void presenter_request_dump();
 
 void hooks_install();
+// When set, GetCursorPos reports this logical point instead of the real cursor.
+void hooks_override_cursor(const POINT* pt);
+
+// Game-specific memory tweaks; only applied when the exe matches the known build.
+bool game_verified();
+void game_on_display_probe();
+void game_log_settings(const char* when);
+
+void debug_start();
