@@ -53,9 +53,9 @@ void presenter_wide_size(int* w, int* h) {
                           : MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY);
     GetMonitorInfoA(mon, &mi);
     int mw = mi.rcMonitor.right - mi.rcMonitor.left, mh = mi.rcMonitor.bottom - mi.rcMonitor.top;
-    *h = g_cfg.wide_h;
+    *h = g_cfg.wide_h ? g_cfg.wide_h : mh < 768 ? 768 : mh;
     if (g_cfg.wide_w) *w = g_cfg.wide_w;
-    else *w = mh > 0 ? (int)((int64_t)g_cfg.wide_h * mw / mh) & ~7 : 1024;
+    else *w = mh > 0 ? (int)((int64_t)*h * mw / mh) & ~7 : 1024;
     if (*w < 1024) *w = 1024;
 }
 

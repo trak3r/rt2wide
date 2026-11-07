@@ -19,7 +19,7 @@ struct Config {
     // Otherwise it keeps its fixed 1024x768 full-screen mode and the picture is scaled.
     bool wide = true;
     int wide_w = 0;  // 0 = derive from the monitor's aspect ratio
-    int wide_h = 768;
+    int wide_h = 0;  // 0 = the monitor's height
     bool log = true;
     int trace_limit = 25;
     char dump_dir[MAX_PATH] = "";

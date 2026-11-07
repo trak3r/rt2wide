@@ -39,8 +39,8 @@ void config_load() {
     g_cfg.vsync = GetPrivateProfileIntA("display", "vsync", 1, path) != 0;
     g_cfg.wide = !ini_equals("display", "mode", "wide", "classic", path);
     g_cfg.wide_w = GetPrivateProfileIntA("display", "width", 0, path);
-    g_cfg.wide_h = GetPrivateProfileIntA("display", "height", 768, path);
-    if (g_cfg.wide_h < 600) g_cfg.wide_h = 600;
+    g_cfg.wide_h = GetPrivateProfileIntA("display", "height", 0, path);
+    if (g_cfg.wide_h && g_cfg.wide_h < 768) g_cfg.wide_h = 768;
     if (g_cfg.wide_w && g_cfg.wide_w < 1024) g_cfg.wide_w = 1024;
     g_cfg.log = GetPrivateProfileIntA("debug", "log", 1, path) != 0;
     g_cfg.trace_limit = GetPrivateProfileIntA("debug", "trace_limit", 25, path);

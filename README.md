@@ -14,6 +14,7 @@ Not affiliated with or endorsed by the makers or publishers of Railroad Tycoon I
 
 Experimental, tested on one machine (3440x1440, Windows 11, NVIDIA).
 
+- By default the game draws at the monitor's own resolution (3440x1440 on the test machine), so the map stays sharp at every zoom level instead of being scaled up. The interface keeps its original pixel size, which makes it smaller on a high-resolution monitor; a lower `height` such as 1080 or 768 makes it larger.
 - The in-game map fills the whole screen. The control panel is split into three parts along the bottom (minimap on the left, messages in the centre, logo and zoom/rotate buttons on the right) with the map visible between them, the message ticker runs the full width, and the compass moves to the top-right corner.
 - Pop-up dialogs are centred on the wide screen.
 - The main menu and other full-screen menu pages are centred at their original 1024x768 size.
@@ -55,7 +56,7 @@ Close the game and run `ROLLBACK.cmd`. It removes the mod's files, restores any 
 |---|---|
 | `[rt2wide] enabled` | `0` passes everything through to Windows' own DirectDraw, as if the mod were not installed |
 | `[display] mode` | `wide` (default) or `classic` |
-| `[display] width`, `height` | Size the game draws at in wide mode. `width=0` derives it from the monitor shape; a larger `height` makes the interface smaller |
+| `[display] width`, `height` | Size the game draws at in wide mode. `height=0` (default) uses the monitor's height, minimum 768; `width=0` derives the width from the monitor shape. A lower `height` gives a larger interface and a softer, scaled-up map |
 | `[display] renderer` | `opengl` or `gdi` |
 | `[display] scaling` | `aspect`, `integer` or `stretch` |
 | `[display] filter` | `linear` or `nearest` |

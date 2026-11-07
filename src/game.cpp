@@ -31,6 +31,7 @@ static const Signature kSignatures[] = {
 };
 
 static const uintptr_t kScreenWidth = 0x57ab99;
+static const uintptr_t kScreenHeight = 0x57ab9d;
 static const uintptr_t kUiWindowLoad = 0x507600;
 static const int kUiWindowLoadPrologue = 8;  // whole instructions copied to the trampoline
 static const uintptr_t kUiWindowCommand = 0x507400;
@@ -335,26 +336,32 @@ static bool split_panel_sprite(uint8_t* img, int sprite, int dx) {
 }
 
 static int screen_dx() { return *(int*)kScreenWidth - 1024; }
+static int screen_dy() { return *(int*)kScreenHeight - 768; }
 
 // Frame sprites (ids 334-336) get their bank from code after the layout loads (mwfrme,
 // mwfrms or mwfrmm.imb by game mode) and take their rect from the sprite.
-static void fix_frame_control(uint8_t* c, int dx) {
+// Sprites 0-3 are the toolbar column, the right edge tab, the strip and the panel; the y they
+// were drawn for is checked so a bank that stays loaded is only moved once.
+static void fix_frame_control(uint8_t* c, int dx, int dy) {
+    static const int kFrameY[] = {6, 353, 403, 508};
     uint16_t id = *(uint16_t*)(c + 0x04);
     uint8_t* img = control_image(c);
-    if (!img) return;
-    if (id == 334) {
-        if (*(int*)(img + 0x09) == 1002) *(int*)(img + 0x09) += dx;
-        ctl16(c, 0x0b) = (int16_t)*(int*)(img + 0x09);
-    } else if (id == 335 || id == 336) {
-        if (!split_panel_sprite(img, id - 333, dx)) {
-            log_line("Game: frame sprite %u not recognised, left unsplit", id);
-            return;
-        }
-        ctl16(c, 0x0f) = (int16_t)*(int*)(img + 0x11);
+    if (!img || id < 333 || id > 336) return;
+    int sprite = id - 333;
+    if (*(int*)(img + 0x0d) == kFrameY[sprite]) {
+        *(int*)(img + 0x0d) += dy;
+        if (sprite == 1) *(int*)(img + 0x09) += dx;
     }
+    if ((sprite == 2 || sprite == 3) && !split_panel_sprite(img, sprite, dx))
+        log_line("Game: frame sprite %u not recognised, left unsplit", id);
+    ctl16(c, 0x0b) = (int16_t)*(int*)(img + 0x09);
+    ctl16(c, 0x0d) = (int16_t)*(int*)(img + 0x0d);
+    ctl16(c, 0x0f) = (int16_t)*(int*)(img + 0x11);
 }
 
-// How far a control of the 1024-wide layout moves, for controls that keep their size.
+// How far a control of the 1024x768 layout moves, for controls that keep their size. On a
+// taller screen the panel and the toolbar above it go to the bottom; the map, compass and
+// screen-edge strips are handled separately.
 static int control_shift(uint8_t* c, int x, int dx) {
     uint16_t id = *(uint16_t*)(c + 0x04), type = *(uint16_t*)(c + 0x06);
     if (id == 253 || id == 268 || id == 255 || (id >= 333 && id <= 336) || (type == 0x80 && id == 0)) return 0;
@@ -362,40 +369,60 @@ static int control_shift(uint8_t* c, int x, int dx) {
     return section_shift(x + ctl16(c, 0x0f) / 2, dx);
 }
 
+static int control_vshift(uint8_t* c, int dy) {
+    uint16_t id = *(uint16_t*)(c + 0x04), type = *(uint16_t*)(c + 0x06);
+    if (id == 253 || id == 268 || (id >= 280 && id <= 284) || (id >= 333 && id <= 336) || (type == 0x80 && id == 0)) return 0;
+    return dy;
+}
+
 static void widen_mainwin(uint8_t* win) {
     g_mainwin = win;
-    int dx = screen_dx();
-    if (dx <= 0 || *(int*)(win + 0x09) != 1024) return;
+    int dx = screen_dx(), dy = screen_dy();
+    if (dx < 0 || dy < 0 || (dx == 0 && dy == 0)) return;
+    if (*(int*)(win + 0x09) != 1024 || *(int*)(win + 0x0d) != 768) return;
     *(int*)(win + 0x09) += dx;
     *(int*)(win + 0x19) += dx;
     *(int*)(win + 0x55) += dx;
+    *(int*)(win + 0x0d) += dy;
+    *(int*)(win + 0x1d) += dy;
+    *(int*)(win + 0x59) += dy;
 
-    int stretched = 0, moved = 0;
+    int changed = 0;
     for (uint8_t* c = *(uint8_t**)(win + 0x61); c; c = *(uint8_t**)(c + 0x57)) {
         uint16_t id = *(uint16_t*)(c + 0x04), type = *(uint16_t*)(c + 0x06);
-        int16_t x = ctl16(c, 0x0b), w = ctl16(c, 0x0f), h = ctl16(c, 0x11);
-        int stretch = 0, move = 0;
-        if (id == 253 || id == 268) stretch = dx;                         // map view and its image
-        else if (id == 255) stretch = dx;                                 // ticker text
-        else if (type == 0x80 && id == 0 && x + w == 1018) stretch = dx;  // top/bottom border strips
-        else if (type == 0x80 && id == 0 && x == 1018) move = dx;         // right border pieces
-        else if (id >= 334 && id <= 336) fix_frame_control(c, dx);
-        else move = control_shift(c, x, dx);
-        if (stretch) {
-            ctl16(c, 0x0f) = (int16_t)(w + stretch);
-            if (type == 0x10) *(int*)(c + 0x8b) += stretch;
-            // The map continues under the control panel so the space beside it is not empty.
-            if (id == 253 || id == 268) {
-                ctl16(c, 0x11) = 768;
-                if (type == 0x10) *(int*)(c + 0x8f) += 768 - h;
+        int16_t x = ctl16(c, 0x0b), y = ctl16(c, 0x0d), w = ctl16(c, 0x0f), h = ctl16(c, 0x11);
+        int nx = x, ny = y, nw = w, nh = h;
+        if (id == 253 || id == 268) {
+            // The map fills the screen; the panel sits over it with the map showing between.
+            nw = w + dx;
+            nh = 768 + dy;
+            if (type == 0x10) {
+                *(int*)(c + 0x8b) += nw - w;
+                *(int*)(c + 0x8f) += nh - h;
             }
-            stretched++;
-        } else if (move) {
-            ctl16(c, 0x0b) = (int16_t)(x + move);
-            moved++;
+        } else if (type == 0x80 && id == 0) {
+            // Screen-edge strips: 6px wide along each edge, with corner pieces.
+            if (x + w == 1018) nw = w + dx;
+            if (x == 1018) nx = x + dx;
+            if (y + h == 762) nh = h + dy;
+            if (y == 762) ny = y + dy;
+        } else if (id >= 333 && id <= 336) {
+            fix_frame_control(c, dx, dy);
+            changed++;
+            continue;
+        } else {
+            nx = x + control_shift(c, x, dx);
+            ny = y + control_vshift(c, dy);
+            if (id == 255) nw = w + dx;  // ticker text
         }
+        if (nx == x && ny == y && nw == w && nh == h) continue;
+        ctl16(c, 0x0b) = (int16_t)nx;
+        ctl16(c, 0x0d) = (int16_t)ny;
+        ctl16(c, 0x0f) = (int16_t)nw;
+        ctl16(c, 0x11) = (int16_t)nh;
+        changed++;
     }
-    log_line("Game: mainwin.win widened to %d (stretched %d controls, moved %d)", 1024 + dx, stretched, moved);
+    log_line("Game: mainwin.win laid out for %dx%d (%d controls changed)", 1024 + dx, 768 + dy, changed);
 }
 
 static uint8_t* find_control(uint8_t* win, uint16_t id) {
@@ -411,30 +438,31 @@ typedef int(__fastcall* UiWindowCommandFn)(void* win, void* edx, int* msg);
 static UiWindowCommandFn o_ui_window_command;
 
 static int __fastcall h_ui_window_command(void* win, void* edx, int* msg) {
-    int dx = screen_dx();
-    if (win != g_mainwin || dx <= 0 || !msg) return o_ui_window_command(win, edx, msg);
+    if (win != g_mainwin || !msg) return o_ui_window_command(win, edx, msg);
+    int dx = screen_dx(), dy = screen_dy();
     int cmd = msg[0];
     uint8_t* c = (cmd == kCmdSetBank || cmd == kCmdMove) ? find_control((uint8_t*)win, (uint16_t)msg[1]) : nullptr;
     if (!c) return o_ui_window_command(win, edx, msg);
     if (cmd == kCmdMove) {
-        int x = msg[2], shift = control_shift(c, x, dx);
-        msg[2] = x + shift;
+        int x = msg[2], y = msg[3];
+        msg[2] = x + control_shift(c, x, dx);
+        msg[3] = y + control_vshift(c, dy);
         int r = o_ui_window_command(win, edx, msg);
         msg[2] = x;
+        msg[3] = y;
         return r;
     }
     int r = o_ui_window_command(win, edx, msg);
-    uint16_t id = *(uint16_t*)(c + 0x04);
-    if (id >= 334 && id <= 336) fix_frame_control(c, dx);
+    fix_frame_control(c, dx, dy);
     return r;
 }
 
 typedef void*(__fastcall* UiWindowLoadFn)(void* win, void* edx, int x, int y, const char* name);
 static UiWindowLoadFn o_ui_window_load;
 
-// Layouts the game places for a 1024-wide screen. Full-screen pages are drawn at x=0 and
-// some dialogs at fixed positions that only centre on 1024; both are moved to the centre.
-// Widths come from the .win files (re/tools/windump).
+// Layouts the game places for a 1024x768 screen. Full-screen pages are drawn at 0,0 and
+// some dialogs at fixed positions that only centre on 1024x768; both are moved to the
+// centre. Widths come from the .win files (re/tools/windump).
 static const char* const kFullScreenPages[] = {
     "campaign.win", "compndtl.win", "compnlst.win", "credits.win", "hiscore.win", "playrdtl.win",
     "playrlst.win", "set.win", "setup.win", "setupg.win", "setupl.win", "statndtl.win",
@@ -447,25 +475,26 @@ static const struct { const char* name; int w; } kDialogs[] = {
     {"yearend.win", 521},
 };
 
-static int centre_shift(const char* name, int x) {
-    int dx = *(int*)kScreenWidth - 1024;
-    if (dx <= 0 || !name) return 0;
+// Whether a window was placed for 1024x768. Dialogs the game centres on the real screen
+// itself sit about dx/2 further right; those are left alone in both directions.
+static bool placed_for_1024(const char* name, int x, int y) {
+    if (!name) return false;
     for (const char* page : kFullScreenPages)
-        if (_stricmp(name, page) == 0) return x == 0 ? dx / 2 : 0;
+        if (_stricmp(name, page) == 0) return x == 0 && y == 0;
     for (const auto& d : kDialogs) {
         if (_stricmp(name, d.name) != 0) continue;
         int centred_1024 = (1024 - d.w) / 2;
-        // Dialogs the game already centres on the real screen width sit about dx/2 further right.
-        return (x + d.w <= 1024 && abs(x - centred_1024) <= 48) ? dx / 2 : 0;
+        return x + d.w <= 1024 && abs(x - centred_1024) <= 48;
     }
-    return 0;
+    return false;
 }
 
 static void* __fastcall h_ui_window_load(void* win, void* edx, int x, int y, const char* name) {
-    int shift = centre_shift(name, x);
-    TRACE("Game ui_window_load", "%s at (%d,%d)%s", name ? name : "?", x, y, shift ? " -> centred" : "");
+    int dx = screen_dx(), dy = screen_dy();
+    bool centre = (dx > 0 || dy > 0) && placed_for_1024(name, x, y);
+    TRACE("Game ui_window_load", "%s at (%d,%d)%s", name ? name : "?", x, y, centre ? " -> centred" : "");
     if (win == g_mainwin) g_mainwin = nullptr;
-    void* r = o_ui_window_load(win, edx, x + shift, y, name);
+    void* r = o_ui_window_load(win, edx, centre ? x + dx / 2 : x, centre ? y + dy / 2 : y, name);
     if (name && _stricmp(name, "mainwin.win") == 0) widen_mainwin((uint8_t*)win);
     return r;
 }
@@ -497,12 +526,16 @@ static void install_layout_hook() {
     log_line("Game: layout hooks installed");
 }
 
-static bool is_push_imm32(uintptr_t va, uint32_t value) {
+// One-byte opcodes with a 32-bit immediate operand; kModRmEsi is the byte after 0x81 in
+// "op esi, imm32" (/0 = add).
+enum { kPushImm32 = 0x68, kMovEdxImm32 = 0xBA, kAddEaxImm32 = 0x05, kModRmEsi = 0xC6 };
+
+static bool is_imm32(uintptr_t va, uint8_t opcode, uint32_t value) {
     const uint8_t* p = (const uint8_t*)va;
-    return p[0] == 0x68 && *(const uint32_t*)(p + 1) == value;
+    return p[0] == opcode && *(const uint32_t*)(p + 1) == value;
 }
 
-static void patch_push_imm32(uintptr_t va, uint32_t value) {
+static void patch_imm32(uintptr_t va, uint32_t value) {
     uint8_t* p = (uint8_t*)va;
     DWORD old;
     VirtualProtect(p + 1, 4, PAGE_EXECUTE_READWRITE, &old);
@@ -512,17 +545,44 @@ static void patch_push_imm32(uintptr_t va, uint32_t value) {
 }
 
 // The "Game Paused" / "Game Speed" message (text at 0x57fef8) is drawn centred in a fixed
-// box from x=100 to 923, centred on 1024. Widening the box to keep the same margins on the
-// real width centres it there; the box is also the area redrawn around the message.
-static void centre_flash_message(int screen_w) {
-    static const uintptr_t kBoxRight[] = {0x502324, 0x50276a, 0x5027d9, 0x502de9};  // push 0x39b
-    static const uintptr_t kTextWidth = 0x5027a5;                                     // push 0x338
-    bool ok = is_push_imm32(kTextWidth, 0x338);
-    for (uintptr_t va : kBoxRight) ok = ok && is_push_imm32(va, 0x39b);
-    if (!ok) { log_line("Game: pause/speed message not recognised, left as is"); return; }
-    for (uintptr_t va : kBoxRight) patch_push_imm32(va, screen_w - 101);
-    patch_push_imm32(kTextWidth, screen_w - 200);
+// box (100,214)-(923,343), centred on 1024x768. Widening the box to keep the same side
+// margins and moving it down by half the extra height centres it on the real screen; the
+// box is also the area redrawn around the message.
+static void centre_flash_message(int screen_w, int screen_h) {
+    struct Imm { uintptr_t va; uint8_t opcode; uint32_t value; uint32_t patched; };
+    int dy = (screen_h - 768) / 2;
+    const Imm kImms[] = {
+        // redraw box: right edge, top and bottom at each place the box is invalidated or tested
+        {0x502324, kPushImm32, 0x39b, (uint32_t)screen_w - 101}, {0x502329, kMovEdxImm32, 0xd6, 0xd6u + dy},
+        {0x50231f, kPushImm32, 0x157, 0x157u + dy},
+        {0x50276a, kPushImm32, 0x39b, (uint32_t)screen_w - 101}, {0x50276f, kMovEdxImm32, 0xd6, 0xd6u + dy},
+        {0x502765, kPushImm32, 0x157, 0x157u + dy},
+        {0x5027d9, kPushImm32, 0x39b, (uint32_t)screen_w - 101}, {0x5027de, kMovEdxImm32, 0xd6, 0xd6u + dy},
+        {0x5027d4, kPushImm32, 0x157, 0x157u + dy},
+        {0x502de9, kPushImm32, 0x39b, (uint32_t)screen_w - 101}, {0x502dee, kMovEdxImm32, 0xd6, 0xd6u + dy},
+        {0x502de4, kPushImm32, 0x157, 0x157u + dy},
+        // text: width and top
+        {0x5027a5, kPushImm32, 0x338, (uint32_t)screen_w - 200}, {0x5027aa, kPushImm32, 0xd6, 0xd6u + dy},
+    };
+    for (const Imm& i : kImms)
+        if (!is_imm32(i.va, i.opcode, i.value)) { log_line("Game: pause/speed message not recognised, left as is"); return; }
+    for (const Imm& i : kImms) patch_imm32(i.va, i.patched);
     log_line("Game: pause/speed message centred");
+}
+
+// The in-game speed slider sits on the frame tab at a fixed top of 370, added in both where
+// the thumb is placed (add esi, 0x172) and where a click on the slider becomes a speed
+// (add eax, 0x172). The tab moves down with the HUD, so the slider moves with it.
+static void move_speed_slider(int dy) {
+    const uintptr_t kPlaceThumb = 0x47e0e2, kReadClick = 0x47be50;
+    if (*(const uint8_t*)kPlaceThumb != 0x81 || !is_imm32(kPlaceThumb + 1, kModRmEsi, 0x172) ||
+        !is_imm32(kReadClick, kAddEaxImm32, 0x172)) {
+        log_line("Game: speed slider not recognised, left as is");
+        return;
+    }
+    patch_imm32(kPlaceThumb + 1, 0x172u + dy);
+    patch_imm32(kReadClick, 0x172u + dy);
+    log_line("Game: speed slider moved down %d", dy);
 }
 
 // Runs inside the game's display probe, after the settings defaults are set and before a
@@ -541,5 +601,6 @@ void game_on_display_probe() {
     *(LONG*)(s + 0x14) = h;
     game_log_settings("forced wide");
     install_layout_hook();
-    if (w > 1024) centre_flash_message(w);
+    if (w > 1024 || h > 768) centre_flash_message(w, h);
+    if (h > 768) move_speed_slider(h - 768);
 }
