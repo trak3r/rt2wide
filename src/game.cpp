@@ -489,12 +489,22 @@ static bool placed_for_1024(const char* name, int x, int y) {
     return false;
 }
 
+// The build/edit panels (bpaddtr2.win, bpbulldz.win, ...) open over the centre of the HUD
+// panel at a fixed (282,522), so they move with that section of the HUD.
+static bool is_hud_panel(const char* name, int x, int y) {
+    return g_mainwin && name && _strnicmp(name, "bp", 2) == 0 && x == 282 && y == 522;
+}
+
 static void* __fastcall h_ui_window_load(void* win, void* edx, int x, int y, const char* name) {
     int dx = screen_dx(), dy = screen_dy();
     bool centre = (dx > 0 || dy > 0) && placed_for_1024(name, x, y);
-    TRACE("Game ui_window_load", "%s at (%d,%d)%s", name ? name : "?", x, y, centre ? " -> centred" : "");
+    bool hud = (dx > 0 || dy > 0) && is_hud_panel(name, x, y);
+    TRACE("Game ui_window_load", "%s at (%d,%d)%s", name ? name : "?", x, y,
+          centre ? " -> centred" : hud ? " -> moved with the HUD" : "");
     if (win == g_mainwin) g_mainwin = nullptr;
-    void* r = o_ui_window_load(win, edx, centre ? x + dx / 2 : x, centre ? y + dy / 2 : y, name);
+    int nx = centre ? x + dx / 2 : hud ? section_shift(x, dx) + x : x;
+    int ny = centre ? y + dy / 2 : hud ? y + dy : y;
+    void* r = o_ui_window_load(win, edx, nx, ny, name);
     if (name && _stricmp(name, "mainwin.win") == 0) widen_mainwin((uint8_t*)win);
     return r;
 }
