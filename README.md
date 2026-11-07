@@ -6,7 +6,7 @@ rt2wide is a drop-in `ddraw.dll` that replaces the game's DirectDraw with its ow
 
 ![Railroad Tycoon II on a 3440x1440 ultrawide monitor with rt2wide](docs/screenshot.jpg)
 
-*Railroad Tycoon II Platinum at 3440x1440: the map fills the screen and the control panel is spread along the bottom.*
+*Railroad Tycoon II Platinum drawn at a native 3440x1440: the map fills the screen and the control panel is spread along the bottom.*
 
 Not affiliated with or endorsed by the makers or publishers of Railroad Tycoon II. You need your own copy of the game; nothing from the game is included here.
 
