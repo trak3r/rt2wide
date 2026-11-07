@@ -538,7 +538,7 @@ static void install_layout_hook() {
 
 // One-byte opcodes with a 32-bit immediate operand; kModRmEsi is the byte after 0x81 in
 // "op esi, imm32" (/0 = add).
-enum { kPushImm32 = 0x68, kMovEdxImm32 = 0xBA, kAddEaxImm32 = 0x05, kModRmEsi = 0xC6 };
+enum { kPushImm32 = 0x68, kMovEdxImm32 = 0xBA, kAddEaxImm32 = 0x05, kModRmEsi = 0xC6, kCallRel32 = 0xE8 };
 
 static bool is_imm32(uintptr_t va, uint8_t opcode, uint32_t value) {
     const uint8_t* p = (const uint8_t*)va;
@@ -552,6 +552,109 @@ static void patch_imm32(uintptr_t va, uint32_t value) {
     *(uint32_t*)(p + 1) = value;
     VirtualProtect(p + 1, 4, old, &old);
     FlushInstructionCache(GetCurrentProcess(), p + 1, 4);
+}
+
+// UI events carry the mouse position in screen coordinates (+0x14/+0x18) and +0x1c the
+// control they hit. The screen code of full-screen pages (book pages, territory map, ...)
+// treats that position as page coordinates, which only holds at (0,0). While the screen's
+// handler runs, events on a centred page get page coordinates instead. The event
+// dispatcher (0x501c10) calls the handler at kScreenEventsCall and afterwards compares
+// the event with its copy, so the position is put back.
+static const uintptr_t kWindowList = 0x57feac;  // first open window, +0x51 next
+static const uintptr_t kScreenEventsCall = 0x501ca3, kScreenEvents = 0x4028bf;
+typedef int(__fastcall* ScreenEventsFn)(int* msg);
+
+static bool is_centred_page(const uint8_t* w) {
+    return w && *(const int*)(w + 0x09) == 1024 && *(const int*)(w + 0x0d) == 768 &&
+           *(const int*)(w + 0x01) == screen_dx() / 2 && *(const int*)(w + 0x05) == screen_dy() / 2;
+}
+
+static uint8_t* centred_page_of(uint8_t* control) {
+    int n = 0;
+    for (uint8_t* w = *(uint8_t**)kWindowList; w && n < 64; w = *(uint8_t**)(w + 0x51), n++) {
+        if (!is_centred_page(w)) continue;
+        int m = 0;
+        for (uint8_t* c = *(uint8_t**)(w + 0x61); c && m < 1000; c = *(uint8_t**)(c + 0x57), m++)
+            if (c == control) return w;
+    }
+    return nullptr;
+}
+
+static int __fastcall h_screen_events(int* msg) {
+    uint8_t* page = msg[7] ? centred_page_of((uint8_t*)msg[7]) : nullptr;
+    if (!page) return ((ScreenEventsFn)kScreenEvents)(msg);
+    int x = msg[5], y = msg[6];
+    int px = x - *(int*)(page + 0x01), py = y - *(int*)(page + 0x05);
+    msg[5] = px;
+    msg[6] = py;
+    int r = ((ScreenEventsFn)kScreenEvents)(msg);
+    if (msg[5] == px) msg[5] = x;
+    if (msg[6] == py) msg[6] = y;
+    return r;
+}
+
+static void page_events_in_page_coords() {
+    uint32_t rel = (uint32_t)(kScreenEvents - (kScreenEventsCall + 5));
+    if (!is_imm32(kScreenEventsCall, kCallRel32, rel)) { log_line("Game: screen event call not recognised, left as is"); return; }
+    patch_imm32(kScreenEventsCall, (uint32_t)((uintptr_t)h_screen_events - (kScreenEventsCall + 5)));
+    log_line("Game: page events translated to page coordinates");
+}
+
+// Image controls with a draw callback (+0x9d) call it at kPageDrawCall with the control's
+// screen position. The book pages' callbacks use that position as page coordinates too:
+// background ornaments are cut out at fixed positions minus it and link hotspots are
+// created at it, so on a centred page they draw outside their buffers and the links land
+// off the page. Their callbacks are given page coordinates and, so their final blit still
+// lands on the page, the screen surface (0x57ab88: +0x11 pitch in pixels, +0x19 pixels)
+// and the redraw clip box are shifted to the page while they run.
+static const uintptr_t kPageDrawCall = 0x50b4a5;
+static const uint8_t kPageDrawCode[] = {0x6A, 0xFF, 0x6A, 0x00, 0x83, 0xCA, 0xFF, 0xFF, 0xD7};  // push -1; push 0; or edx,-1; call edi
+static const uintptr_t kScreen = 0x57ab88, kScreen8Bit = 0x55d21c;
+static const uintptr_t kClipLeft = 0x57aab8, kClipTop = 0x57aab4, kClipRight = 0x57aaa4, kClipBottom = 0x57aaa0;
+typedef void(__fastcall* PageDrawFn)(int id, int edx, int, int, int x, int y, int w, int h, int);
+
+static void __stdcall page_draw(uint8_t* control, PageDrawFn draw, int id, int x, int y, int w, int h, int z) {
+    uint8_t* win = *(uint8_t**)(control + 0x4f);
+    if (!is_centred_page(win)) { draw(id, -1, 0, -1, x, y, w, h, z); return; }
+    int ox = *(int*)(win + 0x11), oy = *(int*)(win + 0x15);
+    uint8_t** pixels = (uint8_t**)(kScreen + 0x19);
+    int* clip[] = {(int*)kClipLeft, (int*)kClipRight, (int*)kClipTop, (int*)kClipBottom};
+    int saved_clip[4];
+    for (int i = 0; i < 4; i++) saved_clip[i] = *clip[i];
+    uint8_t* saved_pixels = *pixels;
+    int bpp = *(int*)kScreen8Bit ? 1 : 2;
+    *pixels += ((intptr_t)oy * *(int*)(kScreen + 0x11) + ox) * bpp;
+    for (int i = 0; i < 4; i++) *clip[i] -= i < 2 ? ox : oy;
+    draw(id, -1, 0, -1, x - ox, y - oy, w, h, z);
+    *pixels = saved_pixels;
+    for (int i = 0; i < 4; i++) *clip[i] = saved_clip[i];
+}
+
+static void* g_page_draw = (void*)page_draw;
+
+// Replaces the call: on entry esi = control, edi = callback, ecx = control id, and the
+// stack holds the return address and the five pushed arguments, which page_draw removes.
+__attribute__((naked)) static void page_draw_stub() {
+    __asm__ volatile(
+        "popl %%eax\n\t"
+        "pushl %%ecx\n\t"
+        "pushl %%edi\n\t"
+        "pushl %%esi\n\t"
+        "pushl %%eax\n\t"
+        "jmpl *%0\n\t" ::"m"(g_page_draw));
+}
+
+static void page_draws_in_page_coords() {
+    uint8_t* p = (uint8_t*)kPageDrawCall;
+    if (memcmp(p, kPageDrawCode, sizeof(kPageDrawCode)) != 0) { log_line("Game: page draw call not recognised, left as is"); return; }
+    DWORD old;
+    VirtualProtect(p, sizeof(kPageDrawCode), PAGE_EXECUTE_READWRITE, &old);
+    p[0] = kCallRel32;
+    *(int32_t*)(p + 1) = (int32_t)((uint8_t*)page_draw_stub - (p + 5));
+    memset(p + 5, 0x90, sizeof(kPageDrawCode) - 5);
+    VirtualProtect(p, sizeof(kPageDrawCode), old, &old);
+    FlushInstructionCache(GetCurrentProcess(), p, sizeof(kPageDrawCode));
+    log_line("Game: page draws given page coordinates");
 }
 
 // The "Game Paused" / "Game Speed" message (text at 0x57fef8) is drawn centred in a fixed
@@ -613,4 +716,8 @@ void game_on_display_probe() {
     install_layout_hook();
     if (w > 1024 || h > 768) centre_flash_message(w, h);
     if (h > 768) move_speed_slider(h - 768);
+    if (w > 1024 || h > 768) {
+        page_events_in_page_coords();
+        page_draws_in_page_coords();
+    }
 }
